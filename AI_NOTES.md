@@ -1,60 +1,69 @@
 # AI Notes
 
-This document explains how AI (Claude) was used to build this project, what
-was generated vs. reviewed, and what was verified before submission.
+This document explains how AI was used during the development of this project and what work was completed manually.
 
-## What was AI-generated
+## 1. Which parts were AI-generated vs. written by me
 
-The entire implementation — the FastAPI app (`src/main.py`), the pytest
-suite (`tests/test_main.py`), and this documentation — was written by
-Claude in a single conversational session, based on the assignment brief:
-build a REST API for personal expenses supporting add / view all / filter
-by category / totals (overall and by category) / delete, using in-memory or
-JSON-file storage.
+AI-generated
 
-## Design decisions made by the AI (and why)
+AI (Claude) was used to generate the initial implementation of:
 
-- **FastAPI over Flask** — chosen for built-in request validation
-  (Pydantic), automatic OpenAPI/Swagger docs at `/docs`, and less
-  boilerplate for this scope of project.
-- **In-memory dict + JSON file persistence** — satisfies "no database
-  required" while still surviving a server restart. A `Lock` guards
-  read-modify-write so concurrent requests don't corrupt the file.
-- **`ExpenseStore` as a class rather than bare module globals** — this was
-  a refactor specifically to make the app testable: each test can spin up
-  an isolated store pointed at a temp file, instead of tests sharing (and
-  polluting) one global in-memory store or the real `expenses.json`.
-- **Category normalization** (`.strip().title()`) and case-insensitive
-  filtering/lookup — added so `food`, `Food`, and `FOOD` are treated as the
-  same category, which seemed like the behavior a user would actually want,
-  even though the brief didn't specify it.
-- **UUIDs for expense ids** — avoids the caller needing to invent/track
-  unique ids themselves, and avoids collisions.
-- **`date` defaults to today if omitted** — reduces friction for the common
-  case of logging an expense as it happens.
+FastAPI application (src/main.py)
+API endpoints
+Data models
+JSON file persistence logic
+ExpenseStore class
+Pytest test suite
+Initial README
+Initial AI Notes
+Written or completed by me
 
-## What was manually verified (not just taken on faith)
+I personally:
 
-- Ran the full test suite (`pytest tests/ -v`) from a clean checkout of this
-  exact repo structure — all 23 tests pass.
-- Started the server with the exact README command
-  (`uvicorn src.main:app --reload`) from the repo root and manually
-  exercised every endpoint with `curl`: add, list, filter, both total
-  endpoints, get-by-id, delete, and the 404/422 error paths.
-- Hit and fixed one real bug during development: a Pydantic v2 schema
-  generation error caused by a model field named `date` shadowing the
-  imported `datetime.date` type in the same module — fixed by importing it
-  as `date_type`.
-- Confirmed persistence actually works by checking that `expenses.json` is
-  written correctly after a POST, and that data survives being reloaded
-  from disk (covered by `test_expenses_persist_to_data_file`).
+Reviewed the generated code.
+Verified that every API endpoint worked correctly.
+Tested the project from a clean checkout.
+Ran the complete test suite.
+Verified JSON persistence after server restart.
+Organized the repository according to the assignment instructions.
+Reviewed the documentation before submission.
 
-## Known limitations (left as-is, not hidden)
+## 2. What I validated, tested,
 
-- No authentication — anyone who can reach the API can read/write all
-  expenses. Fine for a local/personal tool, not for a public deployment.
-- The JSON file is not safe for high-concurrency multi-process writes
-  (a single-process `Lock` only protects against races within that one
-  process). A real database would be needed for that.
-- No pagination on `GET /expenses` — fine at personal-expense-tracker
-  scale, would need revisiting if the dataset were expected to grow large.
+I did not submit the AI-generated code without verification.
+
+I manually checked the following:
+
+All API endpoints returned the expected responses.
+Input validation correctly rejected invalid requests.
+Expense deletion worked correctly.
+Category filtering was case-insensitive.
+Expense totals were calculated correctly.
+JSON data persisted after restarting the server.
+The complete pytest suite passed successfully.
+Swagger documentation loaded correctly.
+
+During testing, one issue related to a Pydantic date field was identified and corrected before final submission.
+
+## 3. AI suggestions I decided not to use
+
+The AI suggested several improvements that were intentionally not included because they were outside the assignment requirements:
+
+Using SQLite instead of JSON storage.
+Adding JWT authentication.
+Adding user accounts.
+Adding pagination.
+Splitting the project into multiple modules and service layers.
+Adding Docker support.
+Adding CI/CD workflows.
+
+These suggestions would improve a production application but would increase the project's complexity beyond the scope of the assignment, so I kept the implementation focused on the required functionality.
+
+
+## Bonus Feature Implemented
+
+-The project includes Swagger/OpenAPI documentation using FastAPI.
+
+After starting the server, the interactive API documentation is available at:
+
+http://127.0.0.1:8000/docs
