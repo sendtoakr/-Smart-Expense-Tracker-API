@@ -11,16 +11,13 @@ Features:
 - Delete an expense
 
 Storage: expenses are kept in memory and persisted to a local JSON file
-(expenses.json) so data survives a server restart. No database required.
-
-Run with:
-    uvicorn main:app --reload
-
-Interactive docs (Swagger UI) will be available at:
-    http://127.0.0.1:8000/docs
+so data survives a server restart. No database required. The file path
+can be overridden with the EXPENSES_DATA_FILE environment variable
+(the test suite uses this to avoid touching real data).
 """
 
 import json
+import os
 import uuid
 from datetime import date as date_type
 from pathlib import Path
@@ -31,34 +28,61 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
-# Storage setup
+# Storage
 # ---------------------------------------------------------------------------
 
-DATA_FILE = Path(__file__).parent / "expenses.json"
-_lock = Lock()  # guards read/modify/write of the JSON file
+
+class ExpenseStore:
+    """A tiny in-memory store, backed by a JSON file on disk.
+
+    Kept as a class (rather than bare module globals) so tests can spin up
+    isolated, throwaway stores instead of sharing state with the app used
+    for manual/local runs.
+    """
+
+    def __init__(self, data_file: Path):
+        self.data_file = data_file
+        self._lock = Lock()
+        self._expenses: dict = self._load()
+
+    def _load(self) -> dict:
+        if not self.data_file.exists():
+            return {}
+        try:
+            with self.data_file.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return {item["id"]: item for item in raw}
+        except (json.JSONDecodeError, KeyError):
+            # Corrupted or empty file -> start fresh rather than crash the app
+            return {}
+
+    def _save(self) -> None:
+        with self.data_file.open("w", encoding="utf-8") as f:
+            json.dump(list(self._expenses.values()), f, indent=2, default=str)
+
+    def add(self, record: dict) -> dict:
+        with self._lock:
+            self._expenses[record["id"]] = record
+            self._save()
+        return record
+
+    def all(self) -> list:
+        return list(self._expenses.values())
+
+    def get(self, expense_id: str) -> Optional[dict]:
+        return self._expenses.get(expense_id)
+
+    def delete(self, expense_id: str) -> Optional[dict]:
+        with self._lock:
+            if expense_id not in self._expenses:
+                return None
+            removed = self._expenses.pop(expense_id)
+            self._save()
+        return removed
 
 
-def _load_expenses() -> dict:
-    """Load all expenses from the JSON file into memory as a dict keyed by id."""
-    if not DATA_FILE.exists():
-        return {}
-    try:
-        with DATA_FILE.open("r", encoding="utf-8") as f:
-            raw = json.load(f)
-        return {item["id"]: item for item in raw}
-    except (json.JSONDecodeError, KeyError):
-        # Corrupted or empty file -> start fresh rather than crash the app
-        return {}
-
-
-def _save_expenses(expenses: dict) -> None:
-    """Persist the in-memory expenses dict back to the JSON file."""
-    with DATA_FILE.open("w", encoding="utf-8") as f:
-        json.dump(list(expenses.values()), f, indent=2, default=str)
-
-
-# In-memory store, seeded from disk at startup.
-expenses_db: dict = _load_expenses()
+DEFAULT_DATA_FILE = Path(os.environ.get("EXPENSES_DATA_FILE", Path(__file__).parent.parent / "expenses.json"))
+store = ExpenseStore(DEFAULT_DATA_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -119,18 +143,14 @@ def root():
 @app.post("/expenses", response_model=Expense, status_code=201, tags=["Expenses"])
 def add_expense(expense: ExpenseCreate):
     """Add a new expense. `date` defaults to today if omitted."""
-    new_id = str(uuid.uuid4())
     record = {
-        "id": new_id,
+        "id": str(uuid.uuid4()),
         "title": expense.title,
         "amount": round(expense.amount, 2),
         "category": expense.category,
         "date": (expense.date or date_type.today()).isoformat(),
     }
-    with _lock:
-        expenses_db[new_id] = record
-        _save_expenses(expenses_db)
-    return record
+    return store.add(record)
 
 
 @app.get("/expenses", response_model=list[Expense], tags=["Expenses"])
@@ -140,38 +160,21 @@ def get_expenses(
     )
 ):
     """View all expenses, optionally filtered by category."""
-    items = list(expenses_db.values())
+    items = store.all()
     if category:
         items = [e for e in items if e["category"].lower() == category.strip().lower()]
-    # Most recent first
-    items.sort(key=lambda e: e["date"], reverse=True)
+    items.sort(key=lambda e: e["date"], reverse=True)  # most recent first
     return items
-
-
-@app.get("/expenses/{expense_id}", response_model=Expense, tags=["Expenses"])
-def get_expense(expense_id: str):
-    """Retrieve a single expense by id."""
-    expense = expenses_db.get(expense_id)
-    if not expense:
-        raise HTTPException(status_code=404, detail="Expense not found")
-    return expense
-
-
-@app.delete("/expenses/{expense_id}", status_code=200, tags=["Expenses"])
-def delete_expense(expense_id: str):
-    """Delete an expense by id."""
-    with _lock:
-        if expense_id not in expenses_db:
-            raise HTTPException(status_code=404, detail="Expense not found")
-        removed = expenses_db.pop(expense_id)
-        _save_expenses(expenses_db)
-    return {"message": "Expense deleted", "deleted": removed}
 
 
 @app.get("/expenses/summary/total", response_model=TotalResponse, tags=["Summary"])
 def total_expenses():
-    """Calculate the total of all expenses."""
-    items = list(expenses_db.values())
+    """Calculate the total of all expenses.
+
+    NOTE: registered before /expenses/{expense_id} so "summary" isn't
+    swallowed by the dynamic id route.
+    """
+    items = store.all()
     total = round(sum(e["amount"] for e in items), 2)
     return {"total": total, "count": len(items)}
 
@@ -180,7 +183,7 @@ def total_expenses():
 def totals_by_category():
     """Calculate the total expenses grouped by category."""
     totals: dict = {}
-    for e in expenses_db.values():
+    for e in store.all():
         cat = e["category"]
         bucket = totals.setdefault(cat, {"total": 0.0, "count": 0})
         bucket["total"] += e["amount"]
@@ -195,6 +198,24 @@ def totals_by_category():
 @app.get("/expenses/summary/total/{category}", response_model=TotalResponse, tags=["Summary"])
 def total_by_category(category: str):
     """Calculate the total expenses for a single, specific category."""
-    matches = [e for e in expenses_db.values() if e["category"].lower() == category.strip().lower()]
+    matches = [e for e in store.all() if e["category"].lower() == category.strip().lower()]
     total = round(sum(e["amount"] for e in matches), 2)
     return {"total": total, "count": len(matches), "category": category.strip().title()}
+
+
+@app.get("/expenses/{expense_id}", response_model=Expense, tags=["Expenses"])
+def get_expense(expense_id: str):
+    """Retrieve a single expense by id."""
+    expense = store.get(expense_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    return expense
+
+
+@app.delete("/expenses/{expense_id}", status_code=200, tags=["Expenses"])
+def delete_expense(expense_id: str):
+    """Delete an expense by id."""
+    removed = store.delete(expense_id)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    return {"message": "Expense deleted", "deleted": removed}
